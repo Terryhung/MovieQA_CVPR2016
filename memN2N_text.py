@@ -43,7 +43,7 @@ class MemoryLayer(object):
         """
         self.T_w2v = layer_opts['T_w2v']
 
-    def make_layer(self, n_params, T_u, T_story, T_mask, rng):
+    def make_layer(self, n_params, T_u, T_story, T_mask, rng, flag):
         """
         Inputs:
                 network params      (n_params)
@@ -51,20 +51,22 @@ class MemoryLayer(object):
                 story tensor        (T_story)
         Outputs: output vector      (T_o)
         """
-
         # ------ Encode encoder story data
         T_w2v_out = self.T_w2v[T_story] * T_mask[T_story]
         T_m = T.sum(T_w2v_out, axis=2)
-        T_m_norm = T.sqrt(T.sum(T_m ** 2, axis=2))
-        T_m = T_m / (T_m_norm.dimshuffle(0, 1, 'x') + 1e-6)
-        T_m = T.dot(T_m, n_params['T_B'])
 
+        if flag == 0:
+            T_m = T.dot(T_m, n_params['T_B'])
+        else:
+            T_m = T.dot(T_m, n_params['T_B_1'])
         # ------ Encode decoder story data
         T_w2v_out = self.T_w2v[T_story] * T_mask[T_story]
         T_c = T.sum(T_w2v_out, axis=2)
-        T_c_norm = T.sqrt(T.sum(T_c ** 2, axis=2))
-        T_c = T_c / (T_c_norm.dimshuffle(0, 1, 'x') + 1e-6)
-        T_c = T.dot(T_c, n_params['T_B'])
+
+        if flag == 0:
+            T_c = T.dot(T_c, n_params['T_B'])
+        else:
+            T_c = T.dot(T_c, n_params['T_B_1'])
 
         # ------ Sentence picker: tensor3-matrix product
         T_p = T.nnet.softmax(T.batched_dot(T_m, T_u))
@@ -96,7 +98,7 @@ class MemoryNetwork(object):
         print "#Memory Layers:", self.nl
         print "d-Linear proj:", self.d_lproj
 
-    def setup_model_configuration(self, v2i, story_shape):
+    def setup_model_configuration(self, v2i, story_shape, story_shape1):
         """Setup some configuration parts of the model.
         """
 
@@ -106,6 +108,7 @@ class MemoryNetwork(object):
         # define Look-Up-Table mask
         np_mask = np.vstack((np.zeros(self.d_w2v), np.ones((self.vs - 1, self.d_w2v))))
         self.T_mask = theano.shared(np_mask.astype(theano.config.floatX), name='LUT_mask')
+        self.T_mask_1 = theano.shared(np_mask.astype(theano.config.floatX), name='LUT_mask')
 
         # setup Look-Up-Table to be Word2Vec
         self.pca_mat = None
@@ -158,11 +161,13 @@ class MemoryNetwork(object):
 
         # ------ Input Data
         T_story = T.itensor3('story')   # batch-size X sentences X words
+        T_story_1 = T.itensor3('story_1')   # batch-size X sentences X words
         T_q = T.imatrix('q')            # batch-size X words
         T_y = T.ivector('y_gt')         # batch-size ('single': word index,  'multi_choice': correct option)
         T_z = T.itensor3('z')           # batch-size X multiple options X words
         T_lr = T.scalar('lr')           # learning rate
         self.t_inputs.update({'T_story': T_story})
+        self.t_inputs.update({'T_story_1': T_story_1})
         self.t_inputs.update({'T_q': T_q})
         self.t_inputs.update({'T_y': T_y})
         self.t_inputs.update({'T_z': T_z})
@@ -178,14 +183,35 @@ class MemoryNetwork(object):
         self.t_params.update({'T_B':T_B})
         T_u = T.dot(T_u, T_B)
 
+        # ------ Encode question
+        T_w2v_out = self.T_w2v[T_q] * self.T_mask_1[T_q]
+        T_u_1 = T.sum(T_w2v_out, axis=1)
+        T_u_norm = T.sqrt(T.sum(T_u_1 ** 2, axis=1))
+        T_u_1 = T_u_1 / (T_u_norm.dimshuffle(0, 'x') + 1e-6)
+
+        T_B_1 = theano.shared(init_linear_projection(self.rng, self.d_w2v, self.d_lproj, self.pca_mat), name='B')
+        self.t_params.update({'T_B_1':T_B_1})
+        T_u_1 = T.dot(T_u_1, T_B_1)
+       
+        
+        # ------ Fusion Layer
+        T_c = theano.shared( np.random.rand(300, 100).astype('float32'), 'B')
+        #   T_d = theano.shared( np.random.rand(8, 8).astype('float32'), 'C')
+
+        self.t_params.update({'T_C':T_c})
+        #   self.t_params.update({'T_D':T_d})
         # ------ Layers of memory and attention interaction
         for n in range(self.nl):
             # Add one layer of memory
-            T_o, T_p = mem_layer.make_layer(self.t_params, T_u, T_story, self.T_mask, self.rng)
+            T_o, T_p = mem_layer.make_layer(self.t_params, T_u, T_story, self.T_mask, self.rng, 0)
+            T_o_1, T_p_1 = mem_layer.make_layer(self.t_params, T_u, T_story_1, self.T_mask_1, self.rng, 1)
             T_u = T_u + T_o
+            T_u_1 = T_u_1 + T_o_1
+
 
         self.out_debug = T_p
 
+        print("great")
         # ------ Encode multiple choice answers
         T_w2v_out = self.T_w2v[T_z] * self.T_mask[T_z]
         T_g = T.sum(T_w2v_out, axis=2)
@@ -200,10 +226,14 @@ class MemoryNetwork(object):
         T_u_norm = T.sqrt(T.sum(T_u ** 2, axis=1))
         T_u2 = T_u / (T_u_norm.dimshuffle(0, 'x') + 1e-6)
 
+        T_u_1_norm = T.sqrt(T.sum(T_u_1 ** 2, axis=1))
+        T_u2_1 = T_u_1 / (T_u_1_norm.dimshuffle(0, 'x') + 1e-6)
         # ------ Prediction
         # compute matching score between normalized question (o+u) and answer (g)
         T_h = T_u2.dimshuffle(0, 'x', 1) * T_g2
-        T_s = T.sum(T_h, axis=2)
+        T_h_1 = T_u2_1.dimshuffle(0, 'x', 1) * T_g2
+        T_h = T.concatenate([T_h_1, T_h], axis=1)
+        T_s = T.sum(T.dot(T_h, T_c), axis=2)
 
         # ------ Cost: SoftMax, CrossEntropy
         T_yhat = T.nnet.softmax(T_s)
@@ -250,7 +280,7 @@ class MemoryNetwork(object):
     def train_function(self):
         """Theano function to train the model using a batch of data.
         """
-
+        print self.t_inputs
         train_model = theano.function(inputs=[p for k, p in self.t_inputs.iteritems()],
                                       outputs=[self.t_outputs['T_cost'], self.t_outputs['T_yhat'],
                                                self.out_gnorm, self.out_pnorm],

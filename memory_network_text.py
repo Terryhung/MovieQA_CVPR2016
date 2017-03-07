@@ -26,7 +26,7 @@ rng.seed(1234)
 w2v_mqa_model_filename = 'models/movie_plots_1364.d-300.mc1.w2v'
 
 
-def get_minibatch(batch_idx, stM, quesM, ansM, qinfo, mute_targets=False):
+def get_minibatch(batch_idx, stM, stM1, quesM, ansM, qinfo, mute_targets=False):
     """Create one mini-batch from the data.
     Inputs:
         batch_idx - a vector of indices to select stories, questions from
@@ -40,11 +40,13 @@ def get_minibatch(batch_idx, stM, quesM, ansM, qinfo, mute_targets=False):
     """
 
     story_shape = stM.values()[0].shape
+    story_shape_1 = stM1.values()[0].shape
     num_ma_opts = ansM.shape[1]
 
     inputq = np.zeros((len(batch_idx), quesM.shape[1]), dtype='int32')                             # question input vector
     target = np.zeros((len(batch_idx)), dtype='int32')                                             # answer (as a single number)
     memorydata = np.zeros((len(batch_idx), story_shape[0], story_shape[1]), dtype='int32')         # memory statements
+    memorydata_1 = np.zeros((len(batch_idx), story_shape_1[0], story_shape_1[1]), dtype='int32')         # memory statements
     multians = np.zeros((len(batch_idx), num_ma_opts, ansM.shape[2]), dtype='int32')               # multiple choice answers
     b_qinfo = []
 
@@ -58,10 +60,11 @@ def get_minibatch(batch_idx, stM, quesM, ansM, qinfo, mute_targets=False):
         multians[b] = ansM[bi]   # get list of answers for this batch
         # get story data
         memorydata[b] = stM[qinfo[bi]['movie']]
-        # qinfo
+        memorydata_1[b] = stM1[qinfo[bi]['movie']]
+       # qinfo
         b_qinfo.append(qinfo[bi])
 
-    return memorydata, inputq, target, multians, b_qinfo
+    return memorydata, memorydata_1, inputq, target, multians, b_qinfo
 
 
 def count_errors(yhat, target):
@@ -81,15 +84,16 @@ def call_train_epoch(train_func, train_data, train_range, bs=8, lr=0.01, iterpri
     n_train_batches = int(len(train_range) / bs)
     train_perm = rng.permutation(train_range)
     # iterate over all batches in the data
+
     for batch_count in xrange(n_train_batches):
         it += 1
         # get indices of this minibatch
         this_batch = train_perm[batch_count * bs : (batch_count + 1) * bs]
         # get minibatch
-        memorydata, inputq, target, multians, b_qinfo = \
-            get_minibatch(this_batch, train_data['s'], train_data['q'], train_data['a'], train_data['qinfo'])
+        memorydata, memorydata_1, inputq, target, multians, b_qinfo = \
+            get_minibatch(this_batch, train_data['s'], train_data['s1'], train_data['q'], train_data['a'], train_data['qinfo'])
         # call train model
-        cost, yhat, g_norm, p_norm = train_func(memorydata, inputq, target, multians, lr)
+        cost, yhat, g_norm, p_norm = train_func(memorydata, memorydata_1,inputq, target, multians, lr)
         er = count_errors(yhat, target)
 
         # print iteration info
@@ -137,10 +141,10 @@ def call_test(test_func, test_data, data_range=None, bs=8):
             this_batch = range(batch_count * bs, min( (batch_count+1) * bs, len(test_data['qinfo']) ))
 
         # get minibatch
-        memorydata, inputq, target, multians, b_qinfo = \
-            get_minibatch(this_batch, test_data['s'], test_data['q'], test_data['a'], test_data['qinfo'], mute_targets=mute_targets)
+        memorydata, memorydata_1, inputq, target, multians, b_qinfo = \
+            get_minibatch(this_batch, test_data['s'], test_data['s1'], test_data['q'], test_data['a'], test_data['qinfo'], mute_targets=mute_targets)
         # call test function
-        yhat = test_func(memorydata, inputq, multians)
+        yhat = test_func(memorydata, memorydata_1, inputq, multians)
         if data_range:  # train-val
             er = count_errors(yhat, target)
             test_error += er
@@ -205,22 +209,23 @@ def data_in_matrix_form(stories, QA_words, v2i):
     converting to matrix format (index into LUT vocabulary).
     """
 
-    def add_word_or_UNK():
+    def add_word_or_UNK(v2i):
         if v2i.has_key(word):
             return v2i[word]
         else:
             return v2i['UNK']
-
+    
     # Encode stories
     max_sentences = max([len(story) for story in stories.values()])
     max_words = max([len(sent) for story in stories.values() for sent in story])
+
 
     storyM = {}
     for imdb_key, story in stories.iteritems():
         storyM[imdb_key] = np.zeros((max_sentences, max_words), dtype='int32')
         for jj, sentence in enumerate(story):
             for kk, word in enumerate(sentence):
-                storyM[imdb_key][jj, kk] = add_word_or_UNK()
+                storyM[imdb_key][jj, kk] = add_word_or_UNK(v2i)
 
     print "#stories:", len(storyM)
     print "storyM shape (movie 1):", storyM.values()[0].shape
@@ -230,7 +235,7 @@ def data_in_matrix_form(stories, QA_words, v2i):
     questionM = np.zeros((len(QA_words), max_words), dtype='int32')
     for ii, qa in enumerate(QA_words):
         for jj, word in enumerate(qa['q_w']):
-            questionM[ii, jj] = add_word_or_UNK()
+            questionM[ii, jj] = add_word_or_UNK(v2i)
     print "questionM:", questionM.shape
 
     # Encode answers
@@ -243,7 +248,7 @@ def data_in_matrix_form(stories, QA_words, v2i):
                 answerM[ii, jj, 0] = 1
                 continue
             for kk, word in enumerate(answer):
-                answerM[ii, jj, kk] = add_word_or_UNK()
+                answerM[ii, jj, kk] = add_word_or_UNK(v2i)
     print "answerM:", answerM.shape
 
     return storyM, questionM, answerM
@@ -288,7 +293,17 @@ def main(options):
 
     ### Process story source
     stories, QAs = mqa.get_story_qa_data('full', options['data']['source'])
-    stories = normalize_documents(stories)
+    stories_1 = {}
+    stories_2 = {}
+    for i in stories:
+        a, b = stories[i]
+        stories_1[i] = a
+        stories_2[i] = b
+        
+     
+    stories_1 = normalize_documents(stories_1)
+    stories_2 = normalize_documents(stories_2)
+
 
     ### Load Word2Vec model
     w2v_model = w2v.load(w2v_mqa_model_filename, kind='bin')
@@ -297,18 +312,27 @@ def main(options):
     print "Loaded word2vec model: dim = %d | vocab-size = %d" \
         %(options['memnn']['d-w2v'], len(w2v_model.vocab))
 
+    w2v_model_1 = w2v.load(w2v_mqa_model_filename, kind='bin')
+    options['memnn']['w2v'] = w2v_model_1
+    options['memnn']['d-w2v'] = len(w2v_model_1.get_vector(w2v_model_1.vocab[1]))
+    print "Loaded word2vec model: dim = %d | vocab-size = %d" \
+        %(options['memnn']['d-w2v'], len(w2v_model_1.vocab))
     ### Create vocabulary-to-index and index-to-vocabulary
+
+    
     v2i = {'': 0, 'UNK':1}  # vocabulary to index
-    QA_words, v2i = create_vocabulary(QAs, stories, v2i,
+    QA_words, v2i = create_vocabulary(QAs, stories_1, v2i,
                                  w2v_vocab=w2v_model.vocab.tolist(),
                                  word_thresh=options['data']['vocab_threshold'])
     i2v = {v:k for k,v in v2i.iteritems()}
+
 
     ### Convert QAs and stories into numpy matrices (like in the bAbI data set)
     # storyM - Dictionary - indexed by imdb_key. Values are [num-sentence X max-num-words]
     # questionM - NP array - [num-question X max-num-words]
     # answerM - NP array - [num-question X num-answer-options X max-num-words]
-    storyM, questionM, answerM = data_in_matrix_form(stories, QA_words, v2i)
+    storyM, questionM, answerM = data_in_matrix_form(stories_2, QA_words, v2i)
+    storyM_1, questionM_1, answerM_1 = data_in_matrix_form(stories_1, QA_words, v2i)
     qinfo = associate_additional_QA_info(QAs)
 
     ### Split everything into train, val, and test data
@@ -316,6 +340,10 @@ def main(options):
     val_storyM   = {k:v for k, v in storyM.iteritems() if k in mqa.data_split['val']}
     test_storyM  = {k:v for k, v in storyM.iteritems() if k in mqa.data_split['test']}
 
+    train_storyM1 = {k:v for k, v in storyM_1.iteritems() if k in mqa.data_split['train']}
+    val_storyM1   = {k:v for k, v in storyM_1.iteritems() if k in mqa.data_split['val']}
+    test_storyM1  = {k:v for k, v in storyM_1.iteritems() if k in mqa.data_split['test']}
+    
     def split_train_test(long_list, QAs, trnkey='train', tstkey='val'):
         # Create train/val/test splits based on key
         train_split = [item for k, item in enumerate(long_list) if QAs[k].qid.startswith('train')]
@@ -330,18 +358,21 @@ def main(options):
     train_answerM,   val_answerM,   test_answerM,  = split_train_test(answerM, QAs)
     train_qinfo,     val_qinfo,     test_qinfo     = split_train_test(qinfo, QAs)
 
+    train_questionM1, val_questionM1, test_questionM1 = split_train_test(questionM_1, QAs)
+    train_answerM1,   val_answerM1,   test_answerM1,  = split_train_test(answerM_1, QAs)
+    
     QA_train = [qa for qa in QAs if qa.qid.startswith('train:')]
     QA_val   = [qa for qa in QAs if qa.qid.startswith('val:')]
     QA_test  = [qa for qa in QAs if qa.qid.startswith('test:')]
 
-    train_data = {'s':train_storyM, 'q':train_questionM, 'a':train_answerM, 'qinfo':train_qinfo}
-    val_data =   {'s':val_storyM,   'q':val_questionM,   'a':val_answerM,   'qinfo':val_qinfo}
-    test_data  = {'s':test_storyM,  'q':test_questionM,  'a':test_answerM,  'qinfo':test_qinfo}
+    train_data = {'s':train_storyM, 's1': train_storyM1, 'q':train_questionM, 'a':train_answerM, 'qinfo':train_qinfo}
+    val_data =   {'s':val_storyM,   's1': val_storyM1, 'q':val_questionM,   'a':val_answerM,   'qinfo':val_qinfo}
+    test_data  = {'s':test_storyM,  's1': test_storyM1, 'q':test_questionM,  'a':test_answerM,  'qinfo':test_qinfo}
 
     ### Build model
     print "------------ Build model ------------"
     memnn = MemoryNetwork(options['memnn'], rng)
-    memnn.setup_model_configuration(v2i, storyM.values()[0].shape)
+    memnn.setup_model_configuration(v2i, storyM.values()[0].shape, storyM_1.values()[0].shape)
     memnn.build_model()
     memnn.gradients_and_updates(grad_normalize=options['train']['gnorm'])
 
@@ -414,13 +445,15 @@ def init_option_parser():
 
     usage = """
     Important options are printed here. Check out the code more tweaks.
-    %prog -s <story_source> [-n <num_mem_layers>]
+    %prog -s <story_source> [-z <evaluation_set>] [-n <num_mem_layers>]
                     [--learning_rate <lr>] [--batch_size <bs>] [--nepochs <ep>]
     """
 
     parser = OptionParser(usage=usage)
     parser.add_option("-s", "--story_source", action="store", type="string", default="",
                       help="Story source text: split_plot | dvs | subtitle | script")
+    parser.add_option("-z", "--evaluation_set", action="store", type="string", default="val",
+                      help="Run final evaluation on? [val] | test")
     parser.add_option("-n", "--num_mem_layers", action="store", type=int, default=1,
                       help="Number of Memory layers")
     parser.add_option("",   "--batch_size", action="store", type=int, default=8,
@@ -457,6 +490,7 @@ if __name__ == '__main__':
     options['train']['validate_after'] = 1                      # number of epochs to run validation after
     options['train']['gnorm'] = {'max_norm': 40}                # gradient normalization options 'max_norm' OR 'clip'
     # Data options
+    options['data']['evaluation_set'] = opts.evaluation_set     # Evaluation set (val|test)
     options['data']['source'] = opts.story_source               # use this data source for answering questions
     options['data']['learn_LUT'] = False                        # learn / load LUTs -- depending on data source
     options['data']['vocab_threshold'] = 1                      # word must occur >= N times for it to be part of vocabulary
