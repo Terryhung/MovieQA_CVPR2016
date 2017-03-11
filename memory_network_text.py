@@ -26,7 +26,11 @@ rng.seed(1234)
 w2v_mqa_model_filename = 'models/movie_plots_1364.d-300.mc1.w2v'
 
 
-def get_minibatch(batch_idx, stM, stM1, quesM, ansM, qinfo, mute_targets=False):
+def init_matrix(matrix_para):
+    return np.zeros(matrix_para, dtype='int32')
+
+
+def get_minibatch(batch_idx, stM, stM1, quesM, ansM, qinfo, mute_target=False):
     """Create one mini-batch from the data.
     Inputs:
         batch_idx - a vector of indices to select stories, questions from
@@ -35,33 +39,38 @@ def get_minibatch(batch_idx, stM, stM1, quesM, ansM, qinfo, mute_targets=False):
         memorydata - batchsize X numsentence X numwords - story representation
         inputq - batchsize X numwords - input question representation
         target - batchsize X 1 - correct answer indices during training 0-4
-        multians - batchsize X 5 X numwords - multiple choice answer representations
+        multians - batchsize X 5 X numwords
         b_qinfo - batchsize X [] - list of question information
     """
 
     story_shape = stM.values()[0].shape
     story_shape_1 = stM1.values()[0].shape
     num_ma_opts = ansM.shape[1]
+    batch_len = len(batch_idx)
 
-    inputq = np.zeros((len(batch_idx), quesM.shape[1]), dtype='int32')                             # question input vector
-    target = np.zeros((len(batch_idx)), dtype='int32')                                             # answer (as a single number)
-    memorydata = np.zeros((len(batch_idx), story_shape[0], story_shape[1]), dtype='int32')         # memory statements
-    memorydata_1 = np.zeros((len(batch_idx), story_shape_1[0], story_shape_1[1]), dtype='int32')         # memory statements
-    multians = np.zeros((len(batch_idx), num_ma_opts, ansM.shape[2]), dtype='int32')               # multiple choice answers
+    inputq = init_matrix((batch_len, quesM.shape[1]))  # question input vector
+    target = init_matrix((batch_len))  # answer (as a single number)
+
+    # memory matrix
+    memorydata = init_matrix((batch_len, story_shape[0], story_shape[1]))
+    memorydata_1 = init_matrix((batch_len, story_shape_1[0], story_shape_1[1]))
+
+    # multiple choice answers
+    multians = init_matrix((batch_len, num_ma_opts, ansM.shape[2]))
     b_qinfo = []
 
     for b, bi in enumerate(batch_idx):
         # question vector
         inputq[b] = quesM[bi]
         # answer option number
-        if not mute_targets:
+        if not mute_target:
             target[b] = qinfo[bi]['correct_option']
         # multiple choice answers
         multians[b] = ansM[bi]   # get list of answers for this batch
         # get story data
         memorydata[b] = stM[qinfo[bi]['movie']]
         memorydata_1[b] = stM1[qinfo[bi]['movie']]
-       # qinfo
+        # qinfo
         b_qinfo.append(qinfo[bi])
 
     return memorydata, memorydata_1, inputq, target, multians, b_qinfo
@@ -76,9 +85,6 @@ def count_errors(yhat, target):
 
 
 def call_train_epoch(train_func, train_data, train_range, bs=8, lr=0.01, iterprint=False):
-    """One epoch of training.
-    """
-
     train_error, train_cost, it = 0., 0., 0
 
     n_train_batches = int(len(train_range) / bs)
@@ -88,17 +94,21 @@ def call_train_epoch(train_func, train_data, train_range, bs=8, lr=0.01, iterpri
     for batch_count in xrange(n_train_batches):
         it += 1
         # get indices of this minibatch
-        this_batch = train_perm[batch_count * bs : (batch_count + 1) * bs]
+        this_batch = train_perm[batch_count * bs: (batch_count + 1) * bs]
         # get minibatch
         memorydata, memorydata_1, inputq, target, multians, b_qinfo = \
-            get_minibatch(this_batch, train_data['s'], train_data['s1'], train_data['q'], train_data['a'], train_data['qinfo'])
+            get_minibatch(this_batch, train_data['s'], train_data['s1'],
+                          train_data['q'], train_data['a'],
+                          train_data['qinfo'])
         # call train model
-        cost, yhat, g_norm, p_norm = train_func(memorydata, memorydata_1,inputq, target, multians, lr)
+        cost, yhat, g_norm, p_norm = train_func(memorydata, memorydata_1,
+                                                inputq, target, multians, lr)
         er = count_errors(yhat, target)
 
         # print iteration info
         if iterprint:
-            print "\titer: %5d | train error: %7.3f | batch-cost: %7.3f" %(it, 100.0*er/bs, cost),
+            print "\titer: %5d | train error: %7.3f | batch-cost: %7.3f" % \
+                (it, 100.0*er/bs, cost),
             print "| W norms:", p_norm, "| G norms:", g_norm
 
         # accumulate stuff
@@ -136,13 +146,16 @@ def call_test(test_func, test_data, data_range=None, bs=8):
     for batch_count in xrange(n_test_batches):
         # get indices of this minibatch
         if data_range:  # train-val
-            this_batch = data_range[batch_count * bs : (batch_count + 1) * bs]
+            this_batch = data_range[batch_count * bs: (batch_count + 1) * bs]
         else:  # val and test
-            this_batch = range(batch_count * bs, min( (batch_count+1) * bs, len(test_data['qinfo']) ))
+            this_batch = range(batch_count * bs, min((batch_count+1) * bs,
+                                                     len(test_data['qinfo'])))
 
         # get minibatch
         memorydata, memorydata_1, inputq, target, multians, b_qinfo = \
-            get_minibatch(this_batch, test_data['s'], test_data['s1'], test_data['q'], test_data['a'], test_data['qinfo'], mute_targets=mute_targets)
+            get_minibatch(this_batch, test_data['s'], test_data['s1'],
+                          test_data['q'], test_data['a'],
+                          test_data['qinfo'], mute_targets=mute_targets)
         # call test function
         yhat = test_func(memorydata, memorydata_1, inputq, multians)
         if data_range:  # train-val
@@ -175,8 +188,10 @@ def create_vocabulary(QAs, stories, v2i, w2v_vocab=None, word_thresh=2):
     QA_words = []
     for QA in QAs:
         QA_words.append({})
-        QA_words[-1]['q_w'] = utils.normalize_alphanumeric(QA.question.lower()).split(' ')
-        QA_words[-1]['a_w'] = [utils.normalize_alphanumeric(answer.lower()).split(' ') for answer in QA.answers]
+        QA_words[-1]['q_w'] = \
+            utils.normalize_alphanumeric(QA.question.lower()).split(' ')
+        QA_words[-1]['a_w'] = \
+            [utils.normalize_alphanumeric(answer.lower()).split(' ') for answer in QA.answers]
 
     # Append question and answer words to all_words
     for QAw in QA_words:
@@ -198,9 +213,6 @@ def create_vocabulary(QAs, stories, v2i, w2v_vocab=None, word_thresh=2):
                 # check if word in vocab, or else ignore
                 v2i[w] = len(v2i)
 
-    print "Created a vocabulary of %d words. Threshold removed %.2f %% words" \
-            %(len(v2i), 100*(1. * len(set(all_words)) - len(v2i))/len(all_words))
-
     return QA_words, v2i
 
 
@@ -214,7 +226,7 @@ def data_in_matrix_form(stories, QA_words, v2i):
             return v2i[word]
         else:
             return v2i['UNK']
-    
+
     # Encode stories
     max_sentences = max([len(story) for story in stories.values()])
     max_words = max([len(sent) for story in stories.values() for sent in story])
@@ -299,8 +311,8 @@ def main(options):
         a, b = stories[i]
         stories_1[i] = a
         stories_2[i] = b
-        
-     
+
+
     stories_1 = normalize_documents(stories_1)
     stories_2 = normalize_documents(stories_2)
 
@@ -319,7 +331,7 @@ def main(options):
         %(options['memnn']['d-w2v'], len(w2v_model_1.vocab))
     ### Create vocabulary-to-index and index-to-vocabulary
 
-    
+
     v2i = {'': 0, 'UNK':1}  # vocabulary to index
     QA_words, v2i = create_vocabulary(QAs, stories_1, v2i,
                                  w2v_vocab=w2v_model.vocab.tolist(),
@@ -343,7 +355,7 @@ def main(options):
     train_storyM1 = {k:v for k, v in storyM_1.iteritems() if k in mqa.data_split['train']}
     val_storyM1   = {k:v for k, v in storyM_1.iteritems() if k in mqa.data_split['val']}
     test_storyM1  = {k:v for k, v in storyM_1.iteritems() if k in mqa.data_split['test']}
-    
+
     def split_train_test(long_list, QAs, trnkey='train', tstkey='val'):
         # Create train/val/test splits based on key
         train_split = [item for k, item in enumerate(long_list) if QAs[k].qid.startswith('train')]
@@ -360,7 +372,7 @@ def main(options):
 
     train_questionM1, val_questionM1, test_questionM1 = split_train_test(questionM_1, QAs)
     train_answerM1,   val_answerM1,   test_answerM1,  = split_train_test(answerM_1, QAs)
-    
+
     QA_train = [qa for qa in QAs if qa.qid.startswith('train:')]
     QA_val   = [qa for qa in QAs if qa.qid.startswith('val:')]
     QA_test  = [qa for qa in QAs if qa.qid.startswith('test:')]
@@ -466,7 +478,7 @@ def init_option_parser():
 
 
 if __name__ == '__main__':
-    ### Parse command line options
+    # Parse command line options
     parser = init_option_parser()
     opts, args = parser.parse_args(sys.argv)
 
@@ -477,8 +489,9 @@ if __name__ == '__main__':
     # -------------------------------------------------------
     # Initialize options, lots of defaults, some from parser
     # -------------------------------------------------------
-    options = {'memnn':{}, 'train':{}, 'data':{}}
+    options = {'memnn': {}, 'train': {}, 'data': {}}
     # MemN2N options
+
     options['memnn']['num_mem_layers'] = opts.num_mem_layers    # number of memory layers
     options['memnn']['embed_dimension'] = 300                   # learn LUT -- word embedding dimension
     options['memnn']['d_lproj'] = 300                           # dimension for linear projection (100, 300)
